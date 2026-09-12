@@ -34,15 +34,44 @@ class SlotRepository:
         )
         return list(result.scalars().all())
 
-    def get_all(self, skip: int = 0, limit: int = 100) -> list[Slot]:
-        result = self.db.execute(
-            select(Slot).order_by(Slot.date.desc(), Slot.start_time).offset(skip).limit(limit)
-        )
+    def get_all(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        dpc_id: int | None = None,
+        target_date: date | None = None,
+    ) -> list[Slot]:
+        query = select(Slot)
+        if dpc_id is not None:
+            query = query.where(Slot.dpc_id == dpc_id)
+        if target_date is not None:
+            query = query.where(Slot.date == target_date)
+        query = query.order_by(Slot.date.desc(), Slot.start_time).offset(skip).limit(limit)
+        result = self.db.execute(query)
         return list(result.scalars().all())
 
-    def count(self) -> int:
-        result = self.db.execute(select(func.count(Slot.id)))
+    def count(
+        self,
+        dpc_id: int | None = None,
+        target_date: date | None = None,
+    ) -> int:
+        query = select(func.count(Slot.id))
+        if dpc_id is not None:
+            query = query.where(Slot.dpc_id == dpc_id)
+        if target_date is not None:
+            query = query.where(Slot.date == target_date)
+        result = self.db.execute(query)
         return result.scalar_one()
+
+    def get_available_all(self, target_date: date | None = None) -> list[Slot]:
+        query = select(Slot).where(
+            Slot.status.in_([SlotStatus.available, SlotStatus.partially_booked])
+        )
+        if target_date is not None:
+            query = query.where(Slot.date == target_date)
+        query = query.order_by(Slot.date, Slot.dpc_id, Slot.start_time)
+        result = self.db.execute(query)
+        return list(result.scalars().all())
 
     def create(self, **kwargs) -> Slot:
         slot = Slot(**kwargs)

@@ -49,7 +49,7 @@ def pipeline_diagram(steps: list[tuple[str, str]]) -> None:
     html_parts = []
     for index, (title, subtitle) in enumerate(steps):
         html_parts.append(
-            f'<div style="flex:1;background:#f3f6fb;border:1px solid #d7deea;border-radius:8px;'
+            f'<div style="flex:1;background:#f3f6fb;color:#263746;border:1px solid #d7deea;border-radius:8px;'
             f'padding:8px 10px;text-align:center;">'
             f'<div style="font-weight:600;font-size:0.85rem;">{title}</div>'
             f'<div style="font-size:0.68rem;color:#667;">{subtitle}</div></div>'

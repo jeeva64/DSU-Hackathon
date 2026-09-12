@@ -41,6 +41,24 @@ class RecommendationAnalysisRequest(BaseModel):
     )
 
 
+class RecommendationAnalysisItem(BaseModel):
+    id: int | None = None
+    date: date
+    dpc_id: int | None = None
+    recommendation_type: RecommendationType
+    priority: RecommendationPriority
+    title: str
+    explanation: str
+    expected_impact: str
+    source: str | None = None
+    target: str | None = None
+    farmer_count: int | None = None
+    quantity: float | None = None
+    feasibility_score: float | None = None
+    action: str | None = None
+    scores: dict[str, float] = Field(default_factory=dict)
+
+
 class RecommendationApproveRequest(BaseModel):
     officer_notes: str | None = None
 

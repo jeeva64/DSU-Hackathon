@@ -107,6 +107,26 @@ def register_exception_handlers(app: FastAPI) -> None:
             ),
         )
 
+    @app.exception_handler(ValueError)
+    async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+        """Services raise ValueError for missing entities ("... not found").
+
+        Those map to a useful 404 instead of an unhandled 500; other
+        ValueErrors become a 422 with the message preserved. Request-body
+        validation failures are handled earlier by RequestValidationError.
+        """
+        logger.warning("ValueError | path=%s | %s", request.url.path, exc)
+        if "not found" in str(exc).lower():
+            status_code, code = 404, "NOT_FOUND"
+        else:
+            status_code, code = 422, "INVALID_INPUT"
+        return JSONResponse(
+            status_code=status_code,
+            content=jsonable_encoder(
+                {"error": {"code": code, "message": str(exc)}}
+            ),
+        )
+
     @app.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled exception | path=%s", request.url.path)

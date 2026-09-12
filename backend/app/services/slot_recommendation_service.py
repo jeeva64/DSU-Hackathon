@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy.orm import Session
 
 from backend.app.models.farmer import HarvestReadiness
 from backend.app.models.prediction import PredictionType
-from backend.app.models.recommendation import RecommendationType
-from backend.app.models.slot import SlotStatus
+from backend.app.models.recommendation import RecommendationPriority, RecommendationType
 from backend.app.repositories.dpc_capacity_repo import DPCCapacityRepository
 from backend.app.repositories.dpc_repo import DPCRepository
 from backend.app.repositories.farmer_repo import FarmerRepository
@@ -30,13 +29,6 @@ WEATHER_SCORE_MAP = {
     "medium": 0.50,
     "high": 0.25,
     "critical": 0.0,
-}
-
-READINESS_WEIGHT = {
-    HarvestReadiness.ready.value: 1.0,
-    HarvestReadiness.overdue.value: 1.0,
-    HarvestReadiness.partially_ready.value: 0.6,
-    HarvestReadiness.not_ready.value: 0.2,
 }
 
 
@@ -62,7 +54,6 @@ class DpcContext:
     storage_available: float | None = None
     ready_farmers: int = 0
     overdue_farmers: int = 0
-    priorities: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -101,21 +92,16 @@ class SlotRecommender:
         contexts: list[DpcContext],
         slots_by_dpc: dict[int, list[SlotContext]],
     ) -> list[dict]:
-        by_id = {c.dpc_id: c for c in contexts}
-        candidates = self._candidate_targets(contexts, slots_by_dpc)
-        recommendations: list[dict] = []
-
         projected_qty = {c.dpc_id: c.predicted_quantity for c in contexts}
         projected_farmers = {c.dpc_id: c.predicted_arrivals for c in contexts}
         projected_slot_qty: dict[int, float] = {}
         projected_slot_farmers: dict[int, float] = {}
-
         for context in contexts:
-            slots = slots_by_dpc.get(context.dpc_id, [])
-            share = self._slot_distribution(context, slots)
-            for slot, qty, farmers in share:
+            for slot, qty, farmers in self._slot_distribution(context, slots_by_dpc.get(context.dpc_id, [])):
                 projected_slot_qty[slot.slot_id] = qty
                 projected_slot_farmers[slot.slot_id] = farmers
+
+        recommendations: list[dict] = []
 
         overloaded = []
         for context in contexts:
@@ -127,67 +113,67 @@ class SlotRecommender:
                     else "high"
                 )
                 overloaded.append((context, load, severity))
-
         overloaded.sort(key=lambda item: item[1], reverse=True)
 
         for context, load, severity in overloaded:
             avg = self._avg_per_farmer(context)
             excess_farmers = max(0.0, self._excess(context) / avg) if avg > 0 else 0.0
             remaining = excess_farmers
+            taken_slot_farmers: dict[int, float] = {}
 
-            feasible = self._rank_targets(context, candidates, by_id, projected_qty, projected_farmers)
+            feasible = self._rank_targets(
+                context, contexts, slots_by_dpc, projected_qty, projected_farmers,
+                projected_slot_qty, projected_slot_farmers,
+            )
             for alt in feasible:
                 if remaining <= 0.5:
                     break
-                accept_farmers = min(remaining, alt["farmers_headroom"])
+                if alt["kind"] == "slot":
+                    already = taken_slot_farmers.get(alt["slot_id"], 0.0)
+                    accept_farmers = min(remaining, alt["farmers_headroom"] - already)
+                else:
+                    accept_farmers = min(remaining, alt["farmers_headroom"])
                 if accept_farmers <= 0.5:
                     continue
                 accept_qty = accept_farmers * avg
                 if alt["kind"] == "dpc":
                     projected_qty[alt["dpc_id"]] += accept_qty
                     projected_farmers[alt["dpc_id"]] += accept_farmers
+                    target_after_qty = projected_qty[alt["dpc_id"]]
                 else:
+                    taken_slot_farmers[alt["slot_id"]] = already + accept_farmers
                     projected_slot_qty[alt["slot_id"]] += accept_qty
                     projected_slot_farmers[alt["slot_id"]] += accept_farmers
+                    target_after_qty = projected_slot_qty[alt["slot_id"]]
                 remaining -= accept_farmers
 
                 recommendations.append(
                     self._build_movement(
-                        target_date,
-                        context,
-                        avg,
-                        accept_farmers,
-                        accept_qty,
-                        alt,
-                        load,
-                        severity,
+                        target_date, context, load, severity, alt, accept_farmers, accept_qty,
+                        target_after_qty,
                     )
                 )
 
             if remaining >= 0.5:
-                resource_rec = self._build_boost(target_date, context, remaining, severity)
-                if resource_rec:
-                    recommendations.append(resource_rec)
+                rec = self._build_boost(target_date, context, remaining, severity)
+                if rec:
+                    recommendations.append(rec)
 
         for context in contexts:
             urgent = context.ready_farmers + context.overdue_farmers
             if urgent <= 0:
                 continue
             load = self._quantity_load(context)
-            slot = self._earliest_slot(context, slots_by_dpc)
+            slot = self._earliest_slot(context, slots_by_dpc.get(context.dpc_id, []))
             recommendations.append(
-                self._build_priority(
-                    target_date, context, urgent, load, slot, avg=self._avg_per_farmer(context)
-                )
+                self._build_priority(target_date, context, urgent, load, slot)
             )
 
         for context in contexts:
             load = self._quantity_load(context)
             if load < self.LOW_LOAD:
-                slot = self._earliest_slot(context, slots_by_dpc)
-                rec = self._build_underutilized(
-                    target_date, context, load, slot, avg=self._avg_per_farmer(context)
-                )
+                slot = self._earliest_slot(context, slots_by_dpc.get(context.dpc_id, []))
+                rec = self._build_underutilized(target_date, context, load, slot)
                 if rec:
                     recommendations.append(rec)
 
@@ -223,131 +209,139 @@ class SlotRecommender:
         qty_total = sum(s.max_quantity for s in slots)
         out = []
         for slot in slots:
-            f = self._slot_farmers(context, slot, farmer_total, qty_total)
-            out.append((slot, f[1], f[0]))
-        return out
-
-    def _slot_farmers(self, context: DpcContext, slot: SlotContext, farmer_total: int, qty_total: float):
-        farmer_share = (
-            context.predicted_arrivals * slot.max_farmers / farmer_total if farmer_total else 0.0
-        )
-        qty_share = context.predicted_quantity * slot.max_quantity / qty_total if qty_total else 0.0
-        return (
-            farmer_share + slot.booked_farmers,
-            qty_share + slot.booked_quantity,
-        )
-
-    def _candidate_targets(self, contexts: list[DpcContext], slots_by_dpc: dict[int, list[SlotContext]]) -> list[dict]:
-        candidates: list[dict] = []
-        for dpc in contexts:
-            if dpc.operating_status not in ("active", "overloaded"):
-                continue
-            candidates.append(
-                {
-                    "kind": "dpc",
-                    "dpc_id": dpc.dpc_id,
-                    "name": dpc.name,
-                    "district": dpc.district,
-                    "lat": dpc.lat,
-                    "lon": dpc.lon,
-                    "capacity": dpc.daily_capacity,
-                    "weather_risk": dpc.weather_risk,
-                    "labour": dpc.labour_available,
-                    "transport": dpc.transport_available,
-                    "weighing": dpc.weighing_capacity,
-                    "processing": dpc.processing_rate,
-                    "storage": dpc.storage_available if dpc.storage_available is not None else dpc.storage_capacity,
-                    "load": self._quantity_load(dpc),
-                }
+            farmer_share = (
+                context.predicted_arrivals * slot.max_farmers / farmer_total if farmer_total else 0.0
             )
-            for slot in slots_by_dpc.get(dpc.dpc_id, []):
-                f_proj, q_proj = self._slot_farmers(dpc, slot, 0, 0)
-                candidates.append(
-                    {
-                        "kind": "slot",
-                        "slot_id": slot.slot_id,
-                        "dpc_id": dpc.dpc_id,
-                        "name": f"{slot.start_time}-{slot.end_time} at {dpc.name}",
-                        "district": dpc.district,
-                        "lat": dpc.lat,
-                        "lon": dpc.lon,
-                        "capacity": slot.max_quantity,
-                        "weather_risk": dpc.weather_risk,
-                        "labour": dpc.labour_available,
-                        "transport": dpc.transport_available,
-                        "weighing": dpc.weighing_capacity,
-                        "processing": dpc.processing_rate,
-                        "storage": dpc.storage_available if dpc.storage_available is not None else dpc.storage_capacity,
-                        "load": q_proj / slot.max_quantity if slot.max_quantity else 0.0,
-                        "projected_qty": q_proj,
-                        "projected_farmers": f_proj,
-                    }
-                )
-        return candidates
+            qty_share = (
+                context.predicted_quantity * slot.max_quantity / qty_total if qty_total else 0.0
+            )
+            out.append((slot, qty_share + slot.booked_quantity, farmer_share + slot.booked_farmers))
+        return out
 
     def _rank_targets(
         self,
         source: DpcContext,
-        candidates: list[dict],
-        dpcs_by_id: dict[int, DpcContext],
+        contexts: list[DpcContext],
+        slots_by_dpc: dict[int, list[SlotContext]],
         projected_qty: dict[int, float],
         projected_farmers: dict[int, float],
+        projected_slot_qty: dict[int, float],
+        projected_slot_farmers: dict[int, float],
     ) -> list[dict]:
-        ranked = []
-        for alt in candidates:
-            if alt["kind"] == "dpc":
-                if alt["dpc_id"] == source.dpc_id:
-                    continue
-                target = dpcs_by_id[alt["dpc_id"]]
-                if self._quantity_load(target) > self.HIGH_LOAD:
-                    continue
-                used = projected_qty[alt["dpc_id"]]
-                headroom_qty = self.TARGET_MAX_LOAD * alt["capacity"] - used
-                avg = self._avg_per_farmer(target) if target.predicted_arrivals > 0 else self.DEFAULT_QUINTALS_PER_FARMER
-            else:
-                if alt["slot_id"] is None:
-                    continue
-                alt_full = candidate_slot_of(alt)
-                proj_qty = alt_full["projected_qty"] + projected_qty[alt["slot_id"]]
-                proj_farmers = alt_full["projected_farmers"] + projected_farmers[alt["slot_id"]]
-                target = dpcs_by_id[alt["dpc_id"]]
-                headroom_qty = min(alt["capacity"] - proj_qty, 0.0)
-                if alt["max_farmers"]:
-                    headroom_qty = min(
-                        alt["max_quantity"] - proj_qty,
-                        (alt["max_farmers"] - proj_farmers) * self._avg_per_farmer(target),
-                    )
-                else:
-                    headroom_qty = 0.0
-                used = proj_qty
-                avg = self._avg_per_farmer(target)
-
-            headroom_qty = max(0.0, headroom_qty)
-            farmers_headroom = headroom_qty / avg if avg > 0 else 0.0
-            if headroom_qty <= 0.0 or farmers_headroom <= 0.0:
+        ranked: list[dict] = []
+        for target in contexts:
+            if target.dpc_id == source.dpc_id:
                 continue
-
-            scores = self._scores(source, alt, headroom_qty, target_dpc=alt.get("dpc_id"))
-            if scores["weather"] < 0.50 or scores["resource"] < 0.40 or scores["processing"] < 0.50:
+            if target.operating_status != "active":
                 continue
-            ranked.append(
-                {
-                    "kind": alt["kind"],
-                    "dpc_id": alt["dpc_id"],
-                    "slot_id": alt.get("slot_id"),
-                    "name": alt["name"],
-                    "headroom_qty": round(headroom_qty, 1),
-                    "farmers_headroom": round(farmers_headroom, 1),
-                    "scores": {k: round(v, 3) for k, v in scores.items()},
-                    "feasibility": round(100.0 * sum(self.WEIGHTS[k] * v for k, v in scores.items()), 1),
-                    "load": used / alt["capacity"] if alt["capacity"] else 1.0,
-                }
+            alt = self._dpc_target_alt(source, target, projected_qty, projected_farmers)
+            if alt is not None:
+                ranked.append(alt)
+
+        for slot in slots_by_dpc.get(source.dpc_id, []):
+            alt = self._slot_target_alt(
+                source, slot, projected_slot_qty.get(slot.slot_id, 0.0),
+                projected_slot_farmers.get(slot.slot_id, 0.0),
             )
+            if alt is not None:
+                ranked.append(alt)
+
         ranked.sort(key=lambda r: -r["feasibility"])
         return ranked
 
-    def _scores(self, source: DpcContext, alt: dict, headroom_qty: float, target_dpc: int | None = None) -> dict:
+    def _dpc_target_alt(self, source: DpcContext, target: DpcContext,
+                        projected_qty: dict[int, float], projected_farmers: dict[int, float]) -> dict | None:
+        if self._quantity_load(target) > self.HIGH_LOAD:
+            return None
+        capacity = target.daily_capacity if target.daily_capacity > 0 else 0.0
+        used = projected_qty.get(target.dpc_id, target.predicted_quantity)
+        headroom_qty = max(0.0, self.TARGET_MAX_LOAD * capacity - used)
+        avg = self._avg_per_farmer(target)
+        farmers_headroom = headroom_qty / avg if avg > 0 else 0.0
+        if headroom_qty <= 0.0:
+            return None
+
+        alt = {
+            "kind": "dpc",
+            "dpc_id": target.dpc_id,
+            "slot_id": None,
+            "name": target.name,
+            "capacity": capacity,
+            "operating_status": target.operating_status,
+            "weather_risk": target.weather_risk,
+            "labour": target.labour_available,
+            "transport": target.transport_available,
+            "weighing": target.weighing_capacity,
+            "processing": target.processing_rate,
+            "storage": target.storage_available if target.storage_available is not None else target.storage_capacity,
+            "lat": target.lat,
+            "lon": target.lon,
+            "district": target.district,
+        }
+        scores = self._scores(source, alt)
+        if not self._passes_filters(scores):
+            return None
+        return {
+            **alt,
+            "headroom_qty": round(headroom_qty, 1),
+            "farmers_headroom": round(farmers_headroom, 1),
+            "scores": {k: round(v, 3) for k, v in scores.items()},
+            "feasibility": round(100.0 * sum(self.WEIGHTS[k] * v for k, v in scores.items()), 1),
+            "load": used / capacity if capacity else 1.0,
+        }
+
+    def _slot_target_alt(self, source: DpcContext, slot: SlotContext, proj_qty: float,
+                         proj_farmers: float) -> dict | None:
+        qty_headroom = max(0.0, slot.max_quantity - proj_qty)
+        farmer_headroom = max(0.0, slot.max_farmers - proj_farmers)
+        qty_cap = self.TARGET_MAX_LOAD * slot.max_quantity - proj_qty
+        farmer_cap = self.TARGET_MAX_LOAD * slot.max_farmers - proj_farmers
+        qty_headroom = min(qty_headroom, max(0.0, qty_cap))
+        farmer_headroom = min(farmer_headroom, max(0.0, farmer_cap))
+        avg = self._avg_per_farmer(source)
+        headroom_qty = min(qty_headroom, farmer_headroom * avg)
+        if headroom_qty <= 0.0:
+            return None
+
+        alt = {
+            "kind": "slot",
+            "dpc_id": source.dpc_id,
+            "slot_id": slot.slot_id,
+            "name": f"{slot.start_time}-{slot.end_time} at {source.name}",
+            "capacity": slot.max_quantity,
+            "operating_status": source.operating_status,
+            "weather_risk": source.weather_risk,
+            "labour": source.labour_available,
+            "transport": source.transport_available,
+            "weighing": source.weighing_capacity,
+            "processing": source.processing_rate,
+            "storage": source.storage_available if source.storage_available is not None else source.storage_capacity,
+            "lat": source.lat,
+            "lon": source.lon,
+            "district": source.district,
+        }
+        scores = self._scores(source, alt)
+        if not self._passes_filters(scores):
+            return None
+        return {
+            **alt,
+            "headroom_qty": round(headroom_qty, 1),
+            "farmers_headroom": round(farmer_headroom, 1),
+            "scores": {k: round(v, 3) for k, v in scores.items()},
+            "feasibility": round(100.0 * sum(self.WEIGHTS[k] * v for k, v in scores.items()), 1),
+            "load": proj_qty / slot.max_quantity if slot.max_quantity else 1.0,
+        }
+
+    def _passes_filters(self, scores: dict) -> bool:
+        return (
+            scores["weather"] >= 0.50
+            and scores["resource"] >= 0.40
+            and scores["processing"] >= 0.50
+        )
+
+    def _scores(self, source: DpcContext, alt: dict) -> dict:
         capacity = alt["capacity"] or 1.0
+        headroom_qty = alt.get("headroom_qty", capacity)
         capacity_score = min(1.0, headroom_qty / capacity)
         time_score = 1.0
         weather_score = WEATHER_SCORE_MAP.get(alt["weather_risk"], 0.75)
@@ -355,7 +349,7 @@ class SlotRecommender:
         transport_score = min(1.0, alt["transport"] / max(1.0, source.predicted_arrivals / 40.0))
         storage_score = min(1.0, alt["storage"] / max(1.0, 0.5 * capacity))
         resource_score = 0.5 * labour_score + 0.3 * transport_score + 0.2 * storage_score
-        assignment_score = self._assignment_score(source, alt, target_dpc)
+        assignment_score = self._assignment_score(source, alt)
         processing_rate = alt["processing"]
         if processing_rate:
             processing_score = min(
@@ -374,12 +368,17 @@ class SlotRecommender:
             "processing": processing_score,
         }
 
-    def _assignment_score(self, source: DpcContext, alt: dict, target_dpc: int | None) -> float:
-        if target_dpc is None or target_dpc == source.dpc_id:
+    def _assignment_score(self, source: DpcContext, alt: dict) -> float:
+        if alt["kind"] == "slot" or alt.get("dpc_id") == source.dpc_id:
             return 1.0
         if alt["district"] == source.district:
             return 1.0
-        if alt.get("lat") is not None and alt.get("lon") is not None and source.lat is not None and source.lon is not None:
+        if (
+            alt.get("lat") is not None
+            and alt.get("lon") is not None
+            and source.lat is not None
+            and source.lon is not None
+        ):
             distance = haversine_km(source.lat, source.lon, alt["lat"], alt["lon"])
             return max(0.10, 1.0 - distance / self.MAX_DISTANCE_KM)
         return 0.55
@@ -388,41 +387,39 @@ class SlotRecommender:
         self,
         target_date: date,
         source: DpcContext,
-        avg: float,
-        farmers: float,
-        qty: float,
-        alt: dict,
         load: float,
         severity: str,
+        alt: dict,
+        farmers: float,
+        qty: float,
+        target_after_qty: float,
     ) -> dict:
-        kind = alt["kind"]
-        action = "redistribute_slots" if kind == "slot" else "divert_to_dpc"
-        rec_type = RecommendationType.slot
+        action = "redistribute_slots" if alt["kind"] == "slot" else "divert_to_dpc"
         priority = severity if severity == "critical" else "high"
         source_after = max(0.0, load - (qty / source.daily_capacity if source.daily_capacity else 0.0))
-        target_name = alt["name"]
+        target_after = target_after_qty / (alt["capacity"] or 1.0)
         reason = (
-            f"Predicted arrivals {source.predicted_arrivals:.0f} ({qty_.f:.0f} quintals) put "
-            f"{source.name} at {load * 100:.0f}% of daily capacity ({self.HIGH_LOAD * 100:.0f}% threshold). "
-            f"Alternative '{target_name}' has {alt['headroom_qty']:.0f} quintals headroom and scores "
-            f"{alt['feasibility']:.0f}/100 for feasibility after leaving {self.TARGET_MAX_LOAD * 100:.0f}% "
-            f"headroom capped."
+            f"Predicted arrivals {source.predicted_arrivals:.0f} or {source.predicted_quantity:.0f} "
+            f"quintals put {source.name} at {load * 100:.0f}% of daily capacity (over the "
+            f"{self.HIGH_LOAD * 100:.0f}% threshold). Alternative '{alt['name']}' has {alt['headroom_qty']:.0f} "
+            f"quintals headroom after applying the {self.TARGET_MAX_LOAD * 100:.0f}% ceiling, weather risk "
+            f"{alt['weather_risk']}, feasibility {alt['feasibility']:.0f}/100."
         )
         impact = (
-            f"Source utilization {load * 100:.0f}% → {source_after * 100:.0f}%; target reaches "
-            f"{min(1.0, alt['load'] + qty / (alt['capacity'] or 1.0)) * 100:.0f}%. "
+            f"Source utilization {load * 100:.0f}% → {min(1.0, source_after) * 100:.0f}%; target reaches "
+            f"{target_after * 100:.0f}% (capped at {self.TARGET_MAX_LOAD * 100:.0f}%). "
             f"Queue relief ≈ {farmers / max(1.0, source.processing_rate or 1.0):.1f}h."
         )
         return {
             "date": target_date,
             "dpc_id": source.dpc_id,
-            "recommendation_type": rec_type.value,
+            "recommendation_type": RecommendationType.slot.value,
             "priority": priority,
             "title": f"Reduce load at {source.name}",
             "explanation": reason,
             "expected_impact": impact,
             "source": source.name,
-            "target": target_name,
+            "target": alt["name"],
             "farmer_count": int(round(farmers)),
             "quantity": round(qty, 1),
             "feasibility_score": alt["feasibility"],
@@ -431,11 +428,11 @@ class SlotRecommender:
         }
 
     def _build_boost(self, target_date: date, context: DpcContext, remaining: float, severity: str) -> dict | None:
-        labour_needed = max(0, int(round(context.predictions_arrivals if hasattr(context, "predictions_arrivals") else context.predicted_arrivals / 10.0)) - context.labour_available)
+        required = max(1, int(round(context.predicted_arrivals / 10.0)))
+        labour_needed = max(0, required - context.labour_available)
         if labour_needed <= 0 and context.transport_available > 0:
             return None
         priority = "high" if severity == "high" else "critical"
-        extra = max(1, labour_needed)
         return {
             "date": target_date,
             "dpc_id": context.dpc_id,
@@ -444,29 +441,21 @@ class SlotRecommender:
             "title": f"Deploy additional staff at {context.name}",
             "explanation": (
                 f"Predicted load still exceeds usable capacity by ~{remaining * self._avg_per_farmer(context):.0f} "
-                f"quintals; labour availability {context.labour_available} is below the ~{max(1, int(round(context.predicted_arrivals / 10.0)))} "
-                f"needed. Adding staff raises effective processing throughput."
+                f"quintals; labour availability {context.labour_available} is below the ~{required} needed. "
+                f"Adding staff and transport raises effective processing throughput."
             ),
-            "expected_impact": f"Processing throughput roughly +{extra * 10:.0f} quintals/day",
+            "expected_impact": f"Processing throughput roughly +{labour_needed * 12:.0f} quintals/day",
             "source": context.name,
             "target": f"{context.name} (staffing)",
             "farmer_count": int(round(remaining)),
             "quantity": round(remaining * self._avg_per_farmer(context), 1),
-            "feasibility_score": round(100.0 * min(1.0, context.labour_available / max(1, extra)), 1),
+            "feasibility_score": round(100.0 * min(1.0, context.labour_available / max(1, required)) + 0.05, 1),
             "scores": {},
             "action": "boost_resources",
         }
 
-    def _build_priority(
-        self,
-        target_date: date,
-        context: DpcContext,
-        urgent: int,
-        load: float,
-        slot: SlotContext | None,
-        avg: float,
-    ) -> dict:
-        target = None
+    def _build_priority(self, target_date: date, context: DpcContext, urgent: int, load: float,
+                        slot: SlotContext | None) -> dict:
         if slot:
             target = f"{slot.start_time}-{slot.end_time} at {context.name}"
         else:
@@ -482,24 +471,18 @@ class SlotRecommender:
                 f"{context.ready_farmers} farmers are harvest-ready and {context.overdue_farmers} are overdue. "
                 f"Give them the earliest feasible slot ({target}) so crop quality is not degraded by waiting."
             ),
-            "expected_impact": f"Protects an estimated {round(urgent * avg, 1)} quintals of crop quality",
+            "expected_impact": f"Protects an estimated {round(urgent * self._avg_per_farmer(context), 1)} quintals of crop quality",
             "source": context.name,
             "target": target,
             "farmer_count": urgent,
-            "quantity": round(urgent * avg, 1),
+            "quantity": round(urgent * self._avg_per_farmer(context), 1),
             "feasibility_score": round(100.0 * (0.5 + 0.5 * min(1.0, load)), 1),
             "scores": {},
             "action": "prioritize_ready_farmers",
         }
 
-    def _build_underutilized(
-        self,
-        target_date: date,
-        context: DpcContext,
-        load: float,
-        slot: SlotContext | None,
-        avg: float,
-    ) -> dict | None:
+    def _build_underutilized(self, target_date: date, context: DpcContext, load: float,
+                             slot: SlotContext | None) -> dict | None:
         if not slot:
             return None
         headroom_farmers = max(0, slot.max_farmers - slot.booked_farmers)
@@ -513,14 +496,14 @@ class SlotRecommender:
             "priority": "low",
             "title": f"Open underutilized slot at {context.name}",
             "explanation": (
-                f"Slot {target} is at {load * 100:.0f}% projected utilization ({self.LOW_LOAD * 100:.0f}% threshold). "
-                f"Invite ready farmers from nearby villages to raise throughput."
+                f"Slot {target} is at {load * 100:.0f}% projected utilization ({self.LOW_LOAD * 100:.0f}% "
+                f"threshold). Invite ready farmers from nearby villages to raise throughput."
             ),
-            "expected_impact": f"Recovers up to {headroom_farmers * avg:.0f} quintals of idle capacity",
+            "expected_impact": f"Recovers up to {headroom_farmers * self._avg_per_farmer(context):.0f} quintals of idle capacity",
             "source": f"{context.name} (underutilized)",
             "target": target,
             "farmer_count": headroom_farmers,
-            "quantity": round(headroom_farmers * avg, 1),
+            "quantity": round(headroom_farmers * self._avg_per_farmer(context), 1),
             "feasibility_score": round(100.0 * (1.0 - load), 1),
             "scores": {},
             "action": "open_underutilized_slots",
@@ -553,16 +536,11 @@ class SlotRecommender:
             "action": "weather_reschedule",
         }
 
-    def _earliest_slot(self, context: DpcContext, slots_by_dpc: dict[int, list[SlotContext]]) -> SlotContext | None:
-        slots = slots_by_dpc.get(context.dpc_id, [])
-        slots = [s for s in slots if s.booked_farmers < s.max_farmers]
-        if not slots:
+    def _earliest_slot(self, context: DpcContext, slots: list[SlotContext]) -> SlotContext | None:
+        available = [s for s in slots if s.booked_farmers < s.max_farmers]
+        if not available:
             return None
-        return min(slots, key=lambda s: (s.start_time, s.slot_id))
-
-
-def _candidate_slot_of(alt: dict) -> dict:
-    return alt
+        return min(available, key=lambda s: (s.start_time, s.slot_id))
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -585,21 +563,13 @@ class SlotRecommendationService:
         self.resource_repo = ResourceAvailabilityRepository(db)
         self.farmer_repo = FarmerRepository(db)
         self.recommendation_repo = RecommendationRepository(db)
+        self._slots_cache: dict[tuple[int, date], list[SlotContext]] = {}
 
     def analyze(self, target_date: date | None = None, persist: bool = True) -> list[dict]:
         if target_date is None:
             target_date = date.today()
 
-        contexts: list[DpcContext] = []
-        slots_by_dpc: dict[int, list[SlotContext]] = {}
-        dpcs = self.dpc_repo.get_active()
-        farmer_readiness = self._farmer_readiness_by_district()
-
-        for dpc in dpcs:
-            context = self._build_dpc_context(dpc, target_date, farmer_readiness)
-            contexts.append(context)
-            slots_by_dpc[dpc.id] = self._build_slots(dpc.id, target_date)
-
+        contexts, slots_by_dpc = self.build_contexts(target_date)
         results = SlotRecommender().analyze(target_date, contexts, slots_by_dpc)
 
         if persist and results:
@@ -608,7 +578,7 @@ class SlotRecommendationService:
                     "dpc_id": r["dpc_id"],
                     "date": r["date"],
                     "recommendation_type": RecommendationType(r["recommendation_type"]),
-                    "priority": r["priority"],
+                    "priority": RecommendationPriority(r["priority"]),
                     "title": r["title"],
                     "explanation": r["explanation"],
                     "expected_impact": r["expected_impact"],
@@ -627,6 +597,15 @@ class SlotRecommendationService:
         logger.info("Slot recommendation analysis produced %d recommendations for %s", len(results), target_date)
         return results
 
+    def build_contexts(self, target_date: date) -> tuple[list[DpcContext], dict[int, list[SlotContext]]]:
+        contexts: list[DpcContext] = []
+        slots_by_dpc: dict[int, list[SlotContext]] = {}
+        farmer_readiness = self._farmer_readiness_by_district()
+        for dpc in self.dpc_repo.get_active():
+            contexts.append(self._build_dpc_context(dpc, target_date, farmer_readiness))
+            slots_by_dpc[dpc.id] = self._slots(dpc.id, target_date)
+        return contexts, slots_by_dpc
+
     def _build_dpc_context(self, dpc, target_date: date, farmer_readiness: dict[str, tuple[int, int]]) -> DpcContext:
         arrivals_pred = self._prediction(dpc.id, target_date, PredictionType.arrival_count)
         quantity_pred = self._prediction(dpc.id, target_date, PredictionType.quantity)
@@ -635,7 +614,6 @@ class SlotRecommendationService:
         resource = self.resource_repo.get_by_dpc_and_date(dpc.id, target_date)
         ready, overdue = farmer_readiness.get(dpc.district, (0, 0))
 
-        name_match = next((loc for loc in LOCATION_NAMES if loc.lower() in (dpc.name or "").lower()), None)
         return DpcContext(
             dpc_id=dpc.id,
             code=dpc.dpc_code,
@@ -673,9 +651,12 @@ class SlotRecommendationService:
                 return self.weather_repo.get_by_date_and_location(target_date, location)
         return None
 
-    def _build_slots(self, dpc_id: int, target_date: date) -> list[SlotContext]:
+    def _slots(self, dpc_id: int, target_date: date) -> list[SlotContext]:
+        key = (dpc_id, target_date)
+        if key in self._slots_cache:
+            return self._slots_cache[key]
         slots = self.slot_repo.get_by_dpc_and_date(dpc_id, target_date)
-        return [
+        contexts = [
             SlotContext(
                 slot_id=s.id,
                 dpc_id=s.dpc_id,
@@ -688,6 +669,8 @@ class SlotRecommendationService:
             )
             for s in slots
         ]
+        self._slots_cache[key] = contexts
+        return contexts
 
     def _farmer_readiness_by_district(self) -> dict[str, tuple[int, int]]:
         counts: dict[str, tuple[int, int]] = {}

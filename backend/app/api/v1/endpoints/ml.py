@@ -15,6 +15,7 @@ from backend.app.schemas.ml import (
     MLStatusResponse,
     MLTargetKind,
     MLTrainRequest,
+    MLTrainResponse,
 )
 
 router = APIRouter()
@@ -46,14 +47,20 @@ def ml_status(service: MLService = Depends(get_ml_service)) -> MLStatusResponse:
     )
 
 
-@router.post("/train")
+@router.post("/train", response_model=MLTrainResponse)
 def ml_train(
     request: MLTrainRequest | None = None,
     service: MLService = Depends(get_ml_service),
-) -> dict:
+) -> MLTrainResponse:
     if request and request.validation_days is not None:
         service.validation_days = request.validation_days
-    return service.train_models()
+    data = service.train_models()
+    return MLTrainResponse(
+        status=data.get("status", "failed"),
+        validation_days=data.get("validation_days"),
+        current_version=data.get("current_version"),
+        targets=data.get("targets", {}),
+    )
 
 
 @router.get("/evaluate")

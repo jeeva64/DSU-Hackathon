@@ -26,6 +26,13 @@ class MLTrainRequest(BaseModel):
     validation_days: int | None = Field(default=None, ge=5, le=30)
 
 
+class MLTrainResponse(BaseModel):
+    status: str
+    validation_days: int | None = None
+    current_version: str | None = None
+    targets: dict[str, dict] = Field(default_factory=dict)
+
+
 class MLPredictionRequest(BaseModel):
     dpc_id: int
     target_date: date

@@ -58,6 +58,7 @@ PAGE_LABELS = [
     "DPC Monitoring",
     "AI Predictions",
     "Risk Center",
+    "AI Decision Center",
     "Scenario Simulation",
 ]
 

@@ -10,19 +10,27 @@ import plotly.graph_objects as go
 from frontend.utils.formatting import severity_color
 
 _BASE_LAYOUT = {
-    "font": {"family": "Segoe UI, Arial, sans-serif", "size": 12},
+    "font": {"family": "Segoe UI, Arial, sans-serif", "size": 12, "color": "#263746"},
     "margin": {"l": 40, "r": 20, "t": 40, "b": 40},
     "paper_bgcolor": "white",
     "plot_bgcolor": "white",
-    "hoverlabel": {"namelength": -1},
+    "hoverlabel": {"namelength": -1, "font": {"color": "#263746"}},
+    "legend": {"font": {"color": "#263746"}},
 }
 
 
 def _apply_layout(fig: go.Figure, title: str | None) -> go.Figure:
     layout = dict(_BASE_LAYOUT)
     if title:
-        layout["title"] = {"text": title, "x": 0.01, "xanchor": "left", "font": {"size": 15}}
+        layout["title"] = {
+            "text": title,
+            "x": 0.01,
+            "xanchor": "left",
+            "font": {"size": 15, "color": "#12395b"},
+        }
     fig.update_layout(**layout)
+    fig.update_xaxes(tickfont={"color": "#526475"}, title_font={"color": "#526475"})
+    fig.update_yaxes(tickfont={"color": "#526475"}, title_font={"color": "#526475"})
     return fig
 
 
@@ -70,8 +78,8 @@ def gauge(value: float, title: str, color: str) -> go.Figure:
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=min(100, max(0, value)),
-        number={"suffix": "%", "font": {"size": 26}},
-        title={"text": title, "font": {"size": 13}},
+        number={"suffix": "%", "font": {"size": 26, "color": "#12395b"}},
+        title={"text": title, "font": {"size": 13, "color": "#526475"}},
         gauge={
             "axis": {"range": [0, 100], "tickwidth": 1},
             "bar": {"color": color},
@@ -82,7 +90,12 @@ def gauge(value: float, title: str, color: str) -> go.Figure:
             ],
         },
     ))
-    fig.update_layout(height=220, margin={"l": 20, "r": 20, "t": 40, "b": 10})
+    fig.update_layout(
+        height=220,
+        margin={"l": 20, "r": 20, "t": 40, "b": 10},
+        paper_bgcolor="white",
+        font={"color": "#263746"},
+    )
     return fig
 
 

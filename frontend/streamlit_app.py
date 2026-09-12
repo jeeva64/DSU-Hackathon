@@ -21,6 +21,7 @@ from frontend.components.metrics import status_badge
 from frontend.config import APP_TAGLINE, APP_TITLE, PAGE_LABELS
 from frontend.pages import (
     dashboard,
+    decision_center,
     dpc_monitoring,
     predictions,
     procurement,
@@ -35,9 +36,22 @@ st.markdown(
     """
     <style>
     #MainMenu, footer, header {visibility: hidden;}
-    .block-container {padding-top: 1.4rem; padding-bottom: 2rem;}
-    div[data-testid="stSidebar"] {background: #f7f9fc;}
-    h1, h2, h3 {color: #12395b;}
+    .block-container {padding-top: 1.4rem; padding-bottom: 2rem; max-width: 1500px;}
+    :root {color-scheme: light;}
+    [data-testid="stAppViewContainer"] {background: #f5f7fb; color: #263746;}
+    [data-testid="stHeader"] {background: transparent;}
+    [data-testid="stSidebar"] {background: #eef3f8; border-right: 1px solid #d7e0ea;}
+    [data-testid="stSidebar"] * {color: #263746;}
+    .stMarkdown, .stCaption, [data-testid="stText"], label, p, li {color: #263746;}
+    h1, h2, h3, h4, h5, h6 {color: #12395b; letter-spacing: 0;}
+    [data-testid="stCaptionContainer"] p {color: #526475;}
+    [data-testid="stMetricLabel"] {color: #526475;}
+    [data-testid="stMetricValue"] {color: #12395b;}
+    [data-testid="stMetricDelta"] {color: #526475;}
+    hr {border-color: #d7e0ea;}
+    [data-testid="stDataFrame"] {border: 1px solid #d7e0ea; border-radius: 8px;}
+    [data-testid="stAlert"] {color: #263746;}
+    [data-testid="stAlert"] p {color: inherit;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -49,6 +63,7 @@ _PAGES = {
     "DPC Monitoring": dpc_monitoring,
     "AI Predictions": predictions,
     "Risk Center": risks,
+    "AI Decision Center": decision_center,
     "Scenario Simulation": simulation,
 }
 

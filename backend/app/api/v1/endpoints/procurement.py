@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from backend.app.db.database import get_db
+from backend.app.models.procurement import ProcurementStatus
 from backend.app.repositories.procurement_repo import ProcurementRepository
 from backend.app.schemas.common import PaginatedResponse
 from backend.app.schemas.procurement import ProcurementCreate, ProcurementRead, ProcurementSummary
@@ -13,15 +14,35 @@ from backend.app.schemas.procurement import ProcurementCreate, ProcurementRead, 
 router = APIRouter()
 
 
-@router.get("", response_model=PaginatedResponse[ProcurementRead])
+@router.get(
+    "",
+    response_model=PaginatedResponse[ProcurementRead],
+    summary="List procurement records with optional date/DPC/status filters",
+)
 def list_procurement(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+    start_date: date | None = Query(default=None, description="Earliest record date (inclusive)"),
+    end_date: date | None = Query(default=None, description="Latest record date (inclusive)"),
+    dpc_id: int | None = Query(default=None, description="Filter by DPC"),
+    status: ProcurementStatus | None = Query(default=None, description="Filter by status"),
     db: Session = Depends(get_db),
 ) -> PaginatedResponse[ProcurementRead]:
     repo = ProcurementRepository(db)
-    items = repo.get_all(skip=skip, limit=limit)
-    total = repo.count()
+    items = repo.get_all(
+        skip=skip,
+        limit=limit,
+        start_date=start_date,
+        end_date=end_date,
+        dpc_id=dpc_id,
+        status=status,
+    )
+    total = repo.count_filtered(
+        start_date=start_date,
+        end_date=end_date,
+        dpc_id=dpc_id,
+        status=status,
+    )
     return PaginatedResponse(
         items=[ProcurementRead.model_validate(p) for p in items],
         total=total,

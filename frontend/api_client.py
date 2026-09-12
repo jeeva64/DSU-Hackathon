@@ -205,12 +205,60 @@ class ApiClient:
         )
 
     # ------------------------------------------------------------------
+    # Dashboard
+    # ------------------------------------------------------------------
+
+    def get_dashboard_summary(self, target_date: str | None = None,
+                              fallback: Any = None) -> tuple[Any, str, dict | None]:
+        params = {"target_date": target_date} if target_date else None
+        return self._safe("GET", "/dashboard/summary", fallback=fallback, params=params)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def get_slots(self, limit: int = 200, dpc_id: int | None = None,
+                  slot_date: str | None = None, fallback: Any = None) -> tuple[Any, str, dict | None]:
+        params: dict = {"skip": 0, "limit": limit}
+        if dpc_id is not None:
+            params["dpc_id"] = dpc_id
+        if slot_date is not None:
+            params["date"] = slot_date
+        return self._safe("GET", "/slots", fallback=fallback, params=params, unwrap=True)
+
+    def get_available_slots(self, dpc_id: int | None = None, slot_date: str | None = None,
+                            fallback: Any = None) -> tuple[Any, str, dict | None]:
+        params: dict = {}
+        if dpc_id is not None:
+            params["dpc_id"] = dpc_id
+        if slot_date is not None:
+            params["date"] = slot_date
+        return self._safe("GET", "/slots/available", fallback=fallback, params=params)
+
+    def create_slot(self, body: dict, fallback: Any = None) -> tuple[Any, str, dict | None]:
+        return self._safe("POST", "/slots", body=body, fallback=fallback)
+
+    # ------------------------------------------------------------------
     # Risks, scenarios, recommendations
     # ------------------------------------------------------------------
 
     def get_risks(self, target_date: str | None = None, fallback: Any = None) -> tuple[Any, str, dict | None]:
         params = {"target_date": target_date} if target_date else None
-        return self._safe("GET", "/risks", fallback=fallback, params=params)
+        return self._safe("GET", "/risks", fallback=fallback, params=params, unwrap=True)
+
+    def get_risks_summary(self, target_date: str | None = None,
+                          fallback: Any = None) -> tuple[Any, str, dict | None]:
+        params = {"target_date": target_date} if target_date else None
+        return self._safe("GET", "/risks/summary", fallback=fallback, params=params)
+
+    def analyze_risks(self, target_date: str | None = None, dpc_id: int | None = None,
+                      fallback: Any = None) -> tuple[Any, str, dict | None]:
+        body: dict = {}
+        if target_date is not None:
+            body["target_date"] = target_date
+        if dpc_id is not None:
+            body["dpc_id"] = dpc_id
+        return self._safe("POST", "/risks/analyze", body=body, fallback=fallback)
 
     def get_scenarios(self, fallback: Any = None) -> tuple[Any, str, dict | None]:
         return self._safe("GET", "/scenarios", fallback=fallback)
@@ -219,15 +267,83 @@ class ApiClient:
         return self._safe("POST", "/scenarios/run", fallback=fallback,
                           body={"scenario_name": scenario_name}, timeout=20)
 
-    def get_recommendations(self, limit: int = 100, fallback: Any = None) -> tuple[Any, str, dict | None]:
-        return self._safe("GET", "/recommendations", fallback=fallback,
-                          params={"skip": 0, "limit": limit}, unwrap=True)
+    def get_simulation_scenarios(self, fallback: Any = None) -> tuple[Any, str, dict | None]:
+        return self._safe("GET", "/simulation/scenarios", fallback=fallback)
+
+    def run_simulation(self, scenario_name: str, fallback: Any = None) -> tuple[Any, str, dict | None]:
+        return self._safe("POST", "/simulation/run", fallback=fallback,
+                          body={"scenario_name": scenario_name}, timeout=20)
+
+    def get_recommendations(self, limit: int = 100, status: str | None = None,
+                            dpc_id: int | None = None, target_date: str | None = None,
+                            fallback: Any = None) -> tuple[Any, str, dict | None]:
+        params: dict = {"skip": 0, "limit": limit}
+        if status is not None:
+            params["status"] = status
+        if dpc_id is not None:
+            params["dpc_id"] = dpc_id
+        if target_date is not None:
+            params["date"] = target_date
+        return self._safe("GET", "/recommendations", fallback=fallback, params=params, unwrap=True)
 
     def get_pending_recommendations(self, fallback: Any = None) -> tuple[Any, str, dict | None]:
         return self._safe("GET", "/recommendations/pending", fallback=fallback)
 
+    # ------------------------------------------------------------------
+    # Predictions (ML-first with statistical fallback)
+    # ------------------------------------------------------------------
+
+    def get_predictions_status(self, fallback: Any = None) -> tuple[Any, str, dict | None]:
+        return self._safe("GET", "/predictions/status", fallback=fallback)
+
+    def train_predictions(self, validation_days: int | None = None,
+                          fallback: Any = None) -> tuple[Any, str, dict | None]:
+        params: dict = {}
+        if validation_days is not None:
+            params["validation_days"] = validation_days
+        return self._safe("POST", "/predictions/train", params=params, fallback=fallback)
+
+    def get_prediction_forecast(self, kind: str, dpc_id: int | None = None,
+                                target_date: str | None = None,
+                                fallback: Any = None) -> tuple[Any, str, dict | None]:
+        """kind is 'arrivals', 'quantity', or 'congestion'."""
+        params: dict = {}
+        if dpc_id is not None:
+            params["dpc_id"] = dpc_id
+        if target_date is not None:
+            params["target_date"] = target_date
+        return self._safe("GET", f"/predictions/{kind}", fallback=fallback, params=params)
+
     def generate_recommendations(self, fallback: Any = None) -> tuple[Any, str, dict | None]:
         return self._safe("POST", "/recommendations/generate", fallback=fallback)
+
+    def approve_recommendation(self, rec_id: int, notes: str | None = None,
+                               fallback: Any = None) -> tuple[Any, str, dict | None]:
+        body: dict = {"officer_notes": notes} if notes else {}
+        return self._safe("POST", f"/recommendations/{rec_id}/approve",
+                          body=body, fallback=fallback, timeout=10)
+
+    def reject_recommendation(self, rec_id: int, notes: str | None = None,
+                              fallback: Any = None) -> tuple[Any, str, dict | None]:
+        body: dict = {"officer_notes": notes} if notes else {}
+        return self._safe("POST", f"/recommendations/{rec_id}/reject",
+                          body=body, fallback=fallback, timeout=10)
+
+    def analyze_recommendations(self, target_date: str | None = None, persist: bool = True,
+                                fallback: Any = None) -> tuple[Any, str, dict | None]:
+        body: dict = {"persist": persist}
+        if target_date is not None:
+            body["target_date"] = target_date
+        return self._safe("POST", "/recommendations/analyze", body=body,
+                          fallback=fallback, timeout=20)
+
+    def optimize_recommendations(self, target_date: str | None = None, persist: bool = True,
+                                 fallback: Any = None) -> tuple[Any, str, dict | None]:
+        body: dict = {"persist": persist}
+        if target_date is not None:
+            body["target_date"] = target_date
+        return self._safe("POST", "/recommendations/optimize", body=body,
+                          fallback=fallback, timeout=30)
 
 
 def error_summary(error: dict | None) -> str:

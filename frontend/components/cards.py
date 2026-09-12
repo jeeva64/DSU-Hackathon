@@ -33,7 +33,7 @@ def dpc_card(
     bags = int(bags_received if bags_received is not None else dpc.get("bags_received_today") or 0)
     remaining = int(remaining_bags if remaining_bags is not None else dpc.get("remaining_capacity_bags") or 0)
 
-    bg = "background:#ffffff;border:1px solid #e3e8f0;border-left:4px solid " + color + ";border-radius:8px;"
+    bg = "background:#ffffff;color:#263746;border:1px solid #e3e8f0;border-left:4px solid " + color + ";border-radius:8px;"
 
     html = (
         f'<div style="{bg};padding:12px 14px;margin-bottom:10px;">'
@@ -66,7 +66,7 @@ def risk_card(risk: dict) -> None:
     metric_text = f" - {fmt_pct(metric)}" if metric not in (None, "", 0) else ""
 
     html = (
-        f'<div style="background:#ffffff;border:1px solid #e3e8f0;border-radius:8px;padding:10px 12px;margin-bottom:8px;">'
+        f'<div style="background:#ffffff;color:#263746;border:1px solid #e3e8f0;border-radius:8px;padding:10px 12px;margin-bottom:8px;">'
         f'<div style="display:flex;justify-content:space-between;align-items:center;">'
         f'<b>{risk_type}{metric_text}</b>{severity_pill(severity)}'
         f'</div>'
@@ -85,7 +85,7 @@ def recommendation_card(rec: dict) -> None:
     explanation = rec.get("explanation") or rec.get("expected_impact") or ""
 
     html = (
-        f'<div style="background:#ffffff;border:1px solid #e3e8f0;border-radius:8px;padding:10px 12px;margin-bottom:8px;">'
+        f'<div style="background:#ffffff;color:#263746;border:1px solid #e3e8f0;border-radius:8px;padding:10px 12px;margin-bottom:8px;">'
         f'<div style="display:flex;justify-content:space-between;align-items:center;"><b>{title}</b>{badge}</div>'
         f'<div style="font-size:0.78rem;color:#445;margin-top:4px;">{explanation}</div>'
         f'</div>'

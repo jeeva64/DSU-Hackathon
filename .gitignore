@@ -44,3 +44,4 @@ coverage.xml
 
 # Testing
 .pytest_cache/
+agents.md

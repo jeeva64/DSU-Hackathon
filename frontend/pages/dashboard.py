@@ -8,9 +8,31 @@ import streamlit as st
 from frontend.components import charts
 from frontend.components.metrics import fallback_note, kpi_row, section_header
 from frontend.components.tables import pct_progress, show_table
-from frontend.config import DEMO_DPCS, DEMO_PROCUREMENT_SUMMARY, DEMO_RISKS
+from frontend.config import CAPACITY_THRESHOLDS, DEMO_DPCS, DEMO_PROCUREMENT_SUMMARY, DEMO_RISKS
 from frontend.utils.formatting import fmt_number, severity_color
 from frontend.utils.state import bump_refresh, demo_mode_enabled, get_client, refresh_key
+
+
+def _load_pct(d: dict) -> float:
+    """Read the demand/load % from live or demo DPC payloads."""
+    return float(d.get("current_utilization_pct") or d.get("utilization_pct") or 0)
+
+
+def _imbalance_band(load_pct: float) -> str:
+    if load_pct >= CAPACITY_THRESHOLDS["critical"]:
+        return "OVERLOADED"
+    if load_pct >= CAPACITY_THRESHOLDS["high"]:
+        return "OVERLOADED"
+    if load_pct >= CAPACITY_THRESHOLDS["watch"]:
+        return "NORMAL"
+    return "UNDERUTILIZED"
+
+
+_IMBALANCE_COLORS = {
+    "UNDERUTILIZED": "#2e7d32",
+    "NORMAL": "#e07c24",
+    "OVERLOADED": "#b00020",
+}
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -132,6 +154,33 @@ def render() -> None:
                                color_map={"Received": "#2e7d32", "Remaining": "#90a4ae"}),
             use_container_width=True,
         )
+
+    st.markdown("---")
+
+    section_header(
+        "Expected Demand vs Available DPC Capacity",
+        "Demand colour bands: UNDERUTILIZED <70% | NORMAL 70-85% | OVERLOADED >85%",
+    )
+    df_imbalance = pd.DataFrame([
+        {"DPC": d.get("name"),
+         "Demand vs capacity %": _load_pct(d),
+         "Band": _imbalance_band(_load_pct(d))}
+        for d in dpcs
+    ]).sort_values("Demand vs capacity %", ascending=True)
+    color_map = {b: c for b, c in _IMBALANCE_COLORS.items() if b in set(df_imbalance["Band"])}
+    st.plotly_chart(
+        charts.hbar(df_imbalance, y="DPC", x="Demand vs capacity %",
+                    color_col="Band", color_map=color_map),
+        use_container_width=True,
+    )
+    imbalance_hint = (
+        "Uneven procurement demand concentrates arrivals at some centres while "
+        "capacity sits idle elsewhere - the core problem NelSync AI addresses."
+    )
+    if demo or source == "demo":
+        st.caption(f"{imbalance_hint} (synthetic demo data)")
+    else:
+        st.caption(imbalance_hint)
 
     st.markdown("---")
     if st.button("Refresh dashboard"):

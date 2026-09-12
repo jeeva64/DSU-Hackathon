@@ -16,9 +16,32 @@ class ProcurementRepository:
     def get_by_id(self, procurement_id: int) -> ProcurementRecord | None:
         return self.db.get(ProcurementRecord, procurement_id)
 
-    def get_all(self, skip: int = 0, limit: int = 100) -> list[ProcurementRecord]:
-        result = self.db.execute(select(ProcurementRecord).offset(skip).limit(limit))
+    def get_all(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        dpc_id: int | None = None,
+        status: ProcurementStatus | None = None,
+    ) -> list[ProcurementRecord]:
+        query = select(ProcurementRecord)
+        query = self._apply_filters(query, start_date, end_date, dpc_id, status)
+        query = query.order_by(ProcurementRecord.date.desc()).offset(skip).limit(limit)
+        result = self.db.execute(query)
         return list(result.scalars().all())
+
+    @staticmethod
+    def _apply_filters(query, start_date, end_date, dpc_id, status):
+        if start_date:
+            query = query.where(ProcurementRecord.date >= start_date)
+        if end_date:
+            query = query.where(ProcurementRecord.date <= end_date)
+        if dpc_id is not None:
+            query = query.where(ProcurementRecord.dpc_id == dpc_id)
+        if status is not None:
+            query = query.where(ProcurementRecord.status == status)
+        return query
 
     def get_by_dpc_and_date_range(
         self, dpc_id: int, start_date: date, end_date: date
@@ -91,4 +114,16 @@ class ProcurementRepository:
 
     def count(self) -> int:
         result = self.db.execute(select(func.count(ProcurementRecord.id)))
+        return result.scalar_one()
+
+    def count_filtered(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        dpc_id: int | None = None,
+        status: ProcurementStatus | None = None,
+    ) -> int:
+        query = select(func.count(ProcurementRecord.id))
+        query = self._apply_filters(query, start_date, end_date, dpc_id, status)
+        result = self.db.execute(query)
         return result.scalar_one()

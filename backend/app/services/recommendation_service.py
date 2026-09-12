@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from backend.app.models.prediction import PredictionType
 from backend.app.models.recommendation import (
+    Recommendation,
     RecommendationPriority,
+    RecommendationStatus,
     RecommendationType,
 )
 from backend.app.repositories.recommendation_repo import RecommendationRepository
@@ -28,6 +30,26 @@ class RecommendationService:
         recs = self.repo.get_all(skip=skip, limit=limit)
         total = self.repo.count()
         return recs, total
+
+    def list_recommendations_filtered(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        status: RecommendationStatus | None = None,
+        dpc_id: int | None = None,
+        target_date: date | None = None,
+    ) -> tuple[list, int]:
+        recs = self.repo.get_filtered(
+            skip=skip, limit=limit, status=status, dpc_id=dpc_id, target_date=target_date
+        )
+        total = self.repo.count_filtered(status=status, dpc_id=dpc_id, target_date=target_date)
+        return recs, total
+
+    def get_by_id(self, rec_id: int) -> Recommendation:
+        rec = self.repo.get_by_id(rec_id)
+        if not rec:
+            raise ValueError(f"Recommendation with ID {rec_id} not found")
+        return rec
 
     def get_pending(self) -> list:
         return self.repo.get_pending()

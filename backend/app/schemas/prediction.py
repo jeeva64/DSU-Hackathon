@@ -37,3 +37,39 @@ class PredictionResponse(BaseModel):
     confidence: float
     model_version: str
     data_source: str = "synthetic"
+
+
+class PredictionForecast(BaseModel):
+    """One forecast row for arrivals/quantity/congestion.
+
+    `data_source` is "ml" when computed from trained scikit-learn models,
+    "statistical" when the deterministic mean+weekend heuristic is used.
+    """
+
+    dpc_id: int
+    dpc_name: str | None = None
+    target_date: date
+    prediction_type: str
+    predicted_value: float | None = None
+    probability: float | None = None
+    severity: str | None = None
+    score: float | None = None
+    confidence: float | None = None
+    model_version: str | None = None
+    data_source: str = "statistical"
+
+
+class PredictionTrainResponse(BaseModel):
+    status: str
+    validation_days: int | None = None
+    current_version: str | None = None
+    targets: dict[str, dict] = Field(default_factory=dict)
+
+
+class PredictionStatusResponse(BaseModel):
+    trained: bool
+    current_version: str | None = None
+    trained_at: str | None = None
+    active_engine: str = "ml"
+    fallback_engine: str = "statistical"
+    message: str

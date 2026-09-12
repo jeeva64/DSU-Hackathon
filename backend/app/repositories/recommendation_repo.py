@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
@@ -22,6 +24,41 @@ class RecommendationRepository:
             select(Recommendation).order_by(Recommendation.created_at.desc()).offset(skip).limit(limit)
         )
         return list(result.scalars().all())
+
+    def get_filtered(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        status: RecommendationStatus | None = None,
+        dpc_id: int | None = None,
+        target_date: date | None = None,
+    ) -> list[Recommendation]:
+        query = select(Recommendation)
+        query = self._apply_filters(query, status, dpc_id, target_date)
+        query = query.order_by(Recommendation.created_at.desc()).offset(skip).limit(limit)
+        result = self.db.execute(query)
+        return list(result.scalars().all())
+
+    def count_filtered(
+        self,
+        status: RecommendationStatus | None = None,
+        dpc_id: int | None = None,
+        target_date: date | None = None,
+    ) -> int:
+        query = select(func.count(Recommendation.id))
+        query = self._apply_filters(query, status, dpc_id, target_date)
+        result = self.db.execute(query)
+        return result.scalar_one()
+
+    @staticmethod
+    def _apply_filters(query, status, dpc_id, target_date):
+        if status is not None:
+            query = query.where(Recommendation.status == status)
+        if dpc_id is not None:
+            query = query.where(Recommendation.dpc_id == dpc_id)
+        if target_date is not None:
+            query = query.where(Recommendation.date == target_date)
+        return query
 
     def get_pending(self) -> list[Recommendation]:
         result = self.db.execute(
